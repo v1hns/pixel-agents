@@ -1,267 +1,233 @@
 /**
- * blessed-based terminal UI renderer.
- * Shows a grid of agent panels with animated pixel art characters.
+ * Terminal renderer using true-color ANSI half-block characters.
+ *
+ * Each terminal row represents 2 "pixel rows" of the scene:
+ *   top half  → ▀ foreground color
+ *   bottom half → ▀ background color
+ * Each terminal column represents CELL_PX sprite pixels wide.
+ *
+ * Scale is auto-calculated to fit the office in the current terminal size.
  */
 
-import * as blessed from 'blessed';
-import * as path from 'path';
-import type { AgentState } from './types';
-import { renderSprite, statusColor, SPRITE_VISUAL_HEIGHT } from './sprites';
+import * as os from 'os';
+import type { PixelBuffer, AgentState, Assets, LayoutData } from './types';
+import { averageBlock } from './pixelBuffer';
+import { buildScene, agentPixelPositions } from './scene';
 
-// Panel sizing
-const PANEL_WIDTH  = 22;  // inner content width (chars)
-const PANEL_HEIGHT = SPRITE_VISUAL_HEIGHT + 6; // sprite + title + activity + padding
+const ENTER_ALT = '\x1b[?1049h';
+const EXIT_ALT = '\x1b[?1049l';
+const HIDE_CUR = '\x1b[?25l';
+const SHOW_CUR = '\x1b[?25h';
+const HOME = '\x1b[H';
+const RESET = '\x1b[0m';
+const VOID_BG = '\x1b[48;2;18;18;30m'; // dark navy void color
 
-// Animation tick (advances at TICK_INTERVAL_MS)
-const TICK_INTERVAL_MS = 400;
+const TICK_MS = 350;
+const LABEL_MAX = 18;
+
+// ─── Color helpers ────────────────────────────────────────────────────────────
+
+const fg = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`;
+const bg = (r: number, g: number, b: number) => `\x1b[48;2;${r};${g};${b}m`;
+
+function statusDot(status: AgentState['status']): string {
+  switch (status) {
+    case 'active':
+      return fg(80, 220, 80) + '●' + RESET;
+    case 'waiting':
+      return fg(220, 180, 40) + '●' + RESET;
+    case 'permission':
+      return fg(220, 60, 60) + '●' + RESET;
+    default:
+      return fg(100, 100, 120) + '●' + RESET;
+  }
+}
+
+// ─── Half-block scene rendering ───────────────────────────────────────────────
+
+function renderScene(scene: PixelBuffer, scale: number): string {
+  const termCols = Math.floor(scene.width / scale);
+  const termRows = Math.floor(scene.height / (scale * 2));
+  const lines: string[] = [];
+
+  for (let ty = 0; ty < termRows; ty++) {
+    let line = '';
+    for (let tx = 0; tx < termCols; tx++) {
+      const sx = tx * scale;
+      const syTop = ty * scale * 2;
+      const syBot = syTop + scale;
+
+      const [tr, tg, tb, ta] = averageBlock(scene, sx, syTop, scale, scale);
+      const [br, bgr, bb, ba] = averageBlock(scene, sx, syBot, scale, scale);
+
+      const topVis = ta > 20;
+      const botVis = ba > 20;
+
+      if (!topVis && !botVis) {
+        line += VOID_BG + '  ' + RESET;
+      } else if (topVis && !botVis) {
+        line += fg(tr, tg, tb) + VOID_BG + '▀▀' + RESET;
+      } else if (!topVis && botVis) {
+        line += VOID_BG + bg(br, bgr, bb) + '▄▄' + RESET;
+      } else {
+        line += fg(tr, tg, tb) + bg(br, bgr, bb) + '▀▀' + RESET;
+      }
+    }
+    lines.push(line);
+  }
+  return lines.join('\r\n');
+}
+
+// ─── Agent label overlay ──────────────────────────────────────────────────────
+// Returns a sparse map of termRow → [(termCol, labelStr)] for overlaying text
+
+function buildLabelMap(
+  agents: AgentState[],
+  seats: Array<{ col: number; row: number }>,
+  sceneW: number,
+  sceneH: number,
+  scale: number,
+): Map<number, Array<[number, string]>> {
+  const map = new Map<number, Array<[number, string]>>();
+  const positions = agentPixelPositions(agents, seats);
+
+  for (const { agent, px, py } of positions) {
+    // Convert pixel coords → terminal coords
+    const termCol = Math.floor(px / scale);
+    const termRow = Math.floor(py / (scale * 2));
+    if (termCol < 0 || termRow < 0) continue;
+
+    // Build label: "● name: activity"
+    const name = agent.projectName.slice(-10);
+    const act = agent.currentActivity.slice(0, LABEL_MAX);
+    const label = `${statusDot(agent.status)} ${name}: ${act}`;
+
+    if (!map.has(termRow)) map.set(termRow, []);
+    map.get(termRow)!.push([termCol, label]);
+  }
+  return map;
+}
+
+// ─── Renderer class ───────────────────────────────────────────────────────────
 
 export class Renderer {
-  private screen: blessed.Widgets.Screen;
-  private headerBox!: blessed.Widgets.BoxElement;
-  private footerBox!: blessed.Widgets.BoxElement;
-  private agentBoxes = new Map<number, blessed.Widgets.BoxElement>();
   private tick = 0;
-  private tickTimer?: ReturnType<typeof setInterval>;
+  private timer?: ReturnType<typeof setInterval>;
   private getAgents: () => AgentState[];
+  private getLayout: () => LayoutData;
+  private getAssets: () => Assets | null;
+  private getSeats: () => Array<{ col: number; row: number }>;
 
-  constructor(getAgents: () => AgentState[]) {
-    this.getAgents = getAgents;
-    this.screen = blessed.screen({
-      smartCSR: true,
-      title: 'Pixel Agents Terminal',
-      dockBorders: true,
-      fullUnicode: true,
-    });
-
-    this.buildChrome();
-
-    // Quit on q / ESC / Ctrl-C
-    this.screen.key(['q', 'escape', 'C-c'], () => {
-      this.stop();
-      process.exit(0);
-    });
+  constructor(opts: {
+    getAgents: () => AgentState[];
+    getLayout: () => LayoutData;
+    getAssets: () => Assets | null;
+    getSeats: () => Array<{ col: number; row: number }>;
+  }) {
+    this.getAgents = opts.getAgents;
+    this.getLayout = opts.getLayout;
+    this.getAssets = opts.getAssets;
+    this.getSeats = opts.getSeats;
   }
-
-  // ─── Chrome ──────────────────────────────────────────────────────────────────
-
-  private buildChrome(): void {
-    this.headerBox = blessed.box({
-      top: 0,
-      left: 0,
-      width: '100%',
-      height: 3,
-      tags: true,
-      style: { fg: 'white', bg: 'blue', bold: true },
-      content: this.headerContent(),
-    });
-
-    this.footerBox = blessed.box({
-      bottom: 0,
-      left: 0,
-      width: '100%',
-      height: 1,
-      tags: true,
-      style: { fg: 'black', bg: 'cyan' },
-      content: ' [q] quit  |  Watching ~/.claude/projects/ for active Claude Code sessions',
-    });
-
-    this.screen.append(this.headerBox);
-    this.screen.append(this.footerBox);
-  }
-
-  private headerContent(): string {
-    const agents = this.getAgents();
-    const count = agents.length;
-    const active = agents.filter((a) => a.status === 'active').length;
-    return (
-      `  Pixel Agents Terminal  |  ` +
-      `${count} session${count !== 1 ? 's' : ''} detected  |  ` +
-      `${active} active`
-    );
-  }
-
-  // ─── Agent panels ────────────────────────────────────────────────────────────
-
-  private rebuildPanels(): void {
-    // Remove all old boxes
-    for (const box of this.agentBoxes.values()) {
-      this.screen.remove(box);
-    }
-    this.agentBoxes.clear();
-
-    const agents = this.getAgents();
-    if (agents.length === 0) {
-      this.renderEmptyState();
-      return;
-    }
-
-    const screenWidth  = this.screen.width as number;
-    const screenHeight = this.screen.height as number;
-
-    const cols = Math.max(1, Math.floor(screenWidth / (PANEL_WIDTH + 4)));
-    let col = 0;
-    let row = 0;
-
-    for (const agent of agents) {
-      const left = col * (PANEL_WIDTH + 4) + 2;
-      const top  = 3 + row * (PANEL_HEIGHT + 2);
-
-      if (top + PANEL_HEIGHT + 1 > screenHeight - 2) {
-        // no more vertical space
-        break;
-      }
-
-      const box = blessed.box({
-        top,
-        left,
-        width: PANEL_WIDTH + 2,  // +2 for border
-        height: PANEL_HEIGHT + 2,
-        tags: false,
-        border: { type: 'line' },
-        style: {
-          border: { fg: this.borderColor(agent) },
-        },
-        scrollable: false,
-      });
-
-      this.screen.append(box);
-      this.agentBoxes.set(agent.id, box);
-
-      col++;
-      if (col >= cols) {
-        col = 0;
-        row++;
-      }
-    }
-  }
-
-  private borderColor(agent: AgentState): string {
-    switch (agent.status) {
-      case 'active':     return 'green';
-      case 'waiting':    return 'yellow';
-      case 'permission': return 'red';
-      default:           return 'gray';
-    }
-  }
-
-  private renderEmptyState(): void {
-    const emptyBox = blessed.box({
-      top:    '50%-4',
-      left:   'center',
-      width:  50,
-      height: 7,
-      border: { type: 'line' },
-      content: [
-        '',
-        '  No active Claude Code sessions found.',
-        '',
-        '  Start a session: claude',
-        '  Or run: claude --session-id <id>',
-      ].join('\n'),
-    });
-    this.screen.append(emptyBox);
-    this.agentBoxes.set(-1, emptyBox);
-  }
-
-  // ─── Per-frame render ─────────────────────────────────────────────────────────
-
-  private renderFrame(): void {
-    const agents = this.getAgents();
-
-    // Rebuild layout if agent set changed
-    const boxIds = new Set(this.agentBoxes.keys());
-    const agentIds = new Set(agents.map((a) => a.id));
-    const changed =
-      boxIds.size !== agentIds.size ||
-      [...agentIds].some((id) => !boxIds.has(id)) ||
-      (boxIds.has(-1) && agents.length > 0);
-
-    if (changed) this.rebuildPanels();
-
-    this.headerBox.setContent(this.headerContent());
-
-    for (const agent of agents) {
-      const box = this.agentBoxes.get(agent.id);
-      if (!box) continue;
-      box.setContent(this.renderAgentContent(agent));
-      // Update border color
-      (box.style as { border: { fg: string } }).border.fg = this.borderColor(agent);
-    }
-
-    this.screen.render();
-  }
-
-  private renderAgentContent(agent: AgentState): string {
-    const spriteLines = renderSprite(agent.status, agent.paletteIndex, this.tick);
-    const statusCol = statusColor(agent.status);
-    const RESET_SEQ = '\x1b[0m';
-
-    // Truncate projectName + session ID suffix to panel width
-    const sessionFile = path.basename(agent.jsonlFile, '.jsonl');
-    const sessionShort = sessionFile.slice(0, 8); // first 8 chars of UUID
-    const nameWidth = PANEL_WIDTH - 10;
-    const projectDisplay = agent.projectName.length > nameWidth
-      ? agent.projectName.slice(0, nameWidth - 1) + '…'
-      : agent.projectName;
-
-    // Activity line: truncate to panel width
-    const actWidth = PANEL_WIDTH - 2;
-    const act = agent.currentActivity.length > actWidth
-      ? agent.currentActivity.slice(0, actWidth - 1) + '…'
-      : agent.currentActivity;
-
-    const lines: string[] = [];
-
-    // Title row: project name + session ID
-    lines.push(
-      `${statusCol}●${RESET_SEQ} ${projectDisplay}  \x1b[90m${sessionShort}…${RESET_SEQ}`
-    );
-    lines.push(''); // spacer
-
-    // Sprite rows (centered in panel)
-    const spriteLeftPad = Math.max(0, Math.floor((PANEL_WIDTH - 12) / 2));
-    const pad = ' '.repeat(spriteLeftPad);
-    for (const spriteLine of spriteLines) {
-      lines.push(pad + spriteLine);
-    }
-
-    lines.push(''); // spacer below sprite
-
-    // Activity / status text
-    lines.push(` ${statusCol}${act}${RESET_SEQ}`);
-
-    // Tool list (show up to 2 active tools)
-    const tools = [...agent.activeToolStatuses.values()].slice(0, 2);
-    for (const t of tools) {
-      const tw = PANEL_WIDTH - 4;
-      const tShort = t.length > tw ? t.slice(0, tw - 1) + '…' : t;
-      lines.push(` \x1b[36m+ ${tShort}${RESET_SEQ}`);
-    }
-
-    return lines.join('\n');
-  }
-
-  // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
   start(): void {
-    this.rebuildPanels();
-    this.screen.render();
-
-    this.tickTimer = setInterval(() => {
+    process.stdout.write(ENTER_ALT + HIDE_CUR);
+    this.renderFrame();
+    this.timer = setInterval(() => {
       this.tick++;
       this.renderFrame();
-    }, TICK_INTERVAL_MS);
+    }, TICK_MS);
+
+    process.stdout.on('resize', () => this.renderFrame());
   }
 
   stop(): void {
-    if (this.tickTimer) clearInterval(this.tickTimer);
-    this.screen.destroy();
+    if (this.timer) clearInterval(this.timer);
+    process.stdout.write(SHOW_CUR + EXIT_ALT);
   }
 
-  /** Call when agent data changes (immediate repaint on next tick). */
   requestRender(): void {
-    // renderFrame is already called on tick, so no explicit call needed.
-    // But force an immediate redraw for responsiveness:
     this.renderFrame();
+  }
+
+  private renderFrame(): void {
+    const assets = this.getAssets();
+    const agents = this.getAgents();
+    const layout = this.getLayout();
+    const seats = this.getSeats();
+    const termW = process.stdout.columns || 120;
+    const termH = process.stdout.rows || 40;
+
+    // ── Header ──────────────────────────────────────────────────────────────
+    const active = agents.filter((a) => a.status === 'active').length;
+    const waiting = agents.filter((a) => a.status === 'waiting').length;
+    const perm = agents.filter((a) => a.status === 'permission').length;
+    const header = [
+      bg(30, 30, 60) + fg(200, 200, 255),
+      '  PIXEL AGENTS  ',
+      RESET + bg(30, 30, 60) + fg(150, 150, 200),
+      `  ${agents.length} sessions `,
+      fg(80, 220, 80) + `  ${active} active ` + fg(150, 150, 200),
+      fg(220, 180, 40) + `  ${waiting} waiting `,
+      perm ? fg(220, 60, 60) + `  ${perm} need permission ` : '',
+      fg(120, 120, 160) + '  [q] quit  ',
+      RESET,
+    ].join('');
+
+    // ── Loading screen ──────────────────────────────────────────────────────
+    if (!assets) {
+      const msg = 'Loading assets…';
+      const row = Math.floor(termH / 2);
+      const col = Math.floor((termW - msg.length) / 2);
+      let out = HOME + header + '\r\n';
+      for (let i = 1; i < row; i++) out += '\r\n';
+      out += ' '.repeat(col) + fg(200, 200, 200) + msg + RESET;
+      process.stdout.write(out);
+      return;
+    }
+
+    // ── Auto scale ──────────────────────────────────────────────────────────
+    const officeW = layout.cols * 16;
+    const officeH = layout.rows * 16;
+    const availW = termW;
+    const availH = termH - 3; // header + footer + gap
+    const scaleH = Math.ceil(officeH / (availH * 2));
+    const scaleW = Math.ceil(officeW / (availW / 2)); // 2 chars per pixel
+    const scale = Math.max(scaleW, scaleH, 1);
+
+    // ── Build scene ─────────────────────────────────────────────────────────
+    const scene = buildScene(layout, assets, agents, seats, this.tick);
+
+    // ── Render to string ─────────────────────────────────────────────────────
+    const sceneStr = renderScene(scene, scale);
+    const sceneRows = sceneStr.split('\r\n');
+    const labelMap = buildLabelMap(agents, seats, scene.width, scene.height, scale);
+
+    // ── Footer ───────────────────────────────────────────────────────────────
+    const footer =
+      bg(20, 20, 40) +
+      fg(100, 100, 140) +
+      `  Watching ~/.claude/projects/  |  scale 1:${scale}  |  ` +
+      `office ${layout.cols}×${layout.rows} tiles` +
+      RESET;
+
+    // ── Assemble output ──────────────────────────────────────────────────────
+    let out = HOME + header + '\r\n';
+
+    for (let r = 0; r < sceneRows.length; r++) {
+      let row = sceneRows[r];
+      // Overlay any labels for this row
+      const labels = labelMap.get(r);
+      if (labels) {
+        // We just append them as a side panel after the scene
+        for (const [, labelStr] of labels) {
+          row += '  ' + labelStr;
+        }
+      }
+      out += row + RESET + '\r\n';
+    }
+
+    out += footer;
+    process.stdout.write(out);
   }
 }
