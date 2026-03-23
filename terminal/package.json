@@ -1,0 +1,23 @@
+{
+  "name": "pixel-agents-terminal",
+  "version": "1.0.0",
+  "description": "Terminal TUI for pixel-agents — monitor concurrent Claude Code sessions outside VS Code",
+  "main": "dist/index.js",
+  "bin": {
+    "pixel-agents-terminal": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.0"
+  }
+}

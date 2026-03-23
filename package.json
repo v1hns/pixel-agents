@@ -65,7 +65,11 @@
     "lint:webview:fix": "cd webview-ui && eslint . --fix",
     "import-tileset": "tsx scripts/import-tileset-cli.ts",
     "format": "prettier --write \"src/**/*.ts\" \"webview-ui/src/**/*.{ts,tsx,css}\" \"*.{js,mjs}\" \"webview-ui/*.{js,ts}\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"webview-ui/src/**/*.{ts,tsx,css}\" \"*.{js,mjs}\" \"webview-ui/*.{js,ts}\""
+    "format:check": "prettier --check \"src/**/*.ts\" \"webview-ui/src/**/*.{ts,tsx,css}\" \"*.{js,mjs}\" \"webview-ui/*.{js,ts}\"",
+    "terminal:install": "cd terminal && npm install",
+    "terminal:build": "cd terminal && npm run build",
+    "terminal:start": "cd terminal && npm start",
+    "terminal:dev": "cd terminal && npm run dev"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
