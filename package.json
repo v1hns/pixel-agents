@@ -69,7 +69,11 @@
     "terminal:install": "cd terminal && npm install",
     "terminal:build": "cd terminal && npm run build",
     "terminal:start": "cd terminal && npm start",
-    "terminal:dev": "cd terminal && npm run dev"
+    "terminal:dev": "cd terminal && npm run dev",
+    "electron:install": "cd electron && npm install",
+    "electron:build": "cd electron && npm run build",
+    "electron:start": "cd electron && npm start",
+    "electron:dev": "npm run build:webview && cd electron && npm run dev"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

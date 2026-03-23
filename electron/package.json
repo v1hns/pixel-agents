@@ -1,0 +1,20 @@
+{
+  "name": "pixel-agents-electron",
+  "version": "1.0.0",
+  "description": "Standalone Electron app for pixel-agents — run the pixel art office outside VS Code",
+  "main": "dist/electron/src/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "electron .",
+    "dev": "npm run build && electron ."
+  },
+  "dependencies": {
+    "electron": "^33.0.0",
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/pngjs": "^6.0.5",
+    "typescript": "^5.3.0"
+  }
+}
