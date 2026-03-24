@@ -137,9 +137,11 @@ function startMonitor(): void {
     ({ id, type, data }: { id: number; type: string; data?: Record<string, unknown> }) => {
       // Translate internal event types to the webview message protocol
       switch (type) {
-        case 'agentStatus':
-          send({ type: 'agentStatus', id, status: data?.status });
+        case 'agentStatus': {
+          const s = data?.status === 'idle' ? 'waiting' : data?.status;
+          send({ type: 'agentStatus', id, status: s });
           break;
+        }
         case 'agentToolStart':
           send({ type: 'agentToolStart', id, toolId: data?.toolId, status: data?.status });
           break;
@@ -172,11 +174,10 @@ function sendExistingAgents(): void {
     agentMeta: {},
     folderNames: {},
   });
-  // Send current statuses for any already-active agents
+  // Send current statuses — map 'idle' to 'waiting' so characters sit on the sofa
   for (const agent of agents) {
-    if (agent.status !== 'idle') {
-      send({ type: 'agentStatus', id: agent.id, status: agent.status });
-    }
+    const status = agent.status === 'idle' ? 'waiting' : agent.status;
+    send({ type: 'agentStatus', id: agent.id, status });
   }
 }
 
