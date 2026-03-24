@@ -205,12 +205,16 @@ export class OfficeState {
     return `${seat.seatCol},${seat.seatRow}`;
   }
 
-  /** Temporarily unblock a character's own seat, run fn, then re-block */
+  /** Temporarily unblock a character's own work seat AND sofa seat, run fn, then re-block */
   private withOwnSeatUnblocked<T>(ch: Character, fn: () => T): T {
     const key = this.ownSeatKey(ch);
+    const sofaSeat = ch.sofaSeatId ? this.sofaSeats.get(ch.sofaSeatId) : null;
+    const sofaKey = sofaSeat ? `${sofaSeat.seatCol},${sofaSeat.seatRow}` : null;
     if (key) this.blockedTiles.delete(key);
+    if (sofaKey) this.blockedTiles.delete(sofaKey);
     const result = fn();
     if (key) this.blockedTiles.add(key);
+    if (sofaKey) this.blockedTiles.add(sofaKey);
     return result;
   }
 
