@@ -79,7 +79,8 @@ let mainWindow: BrowserWindow | null = null;
 let monitor: AgentMonitor | null = null;
 
 function send(data: unknown): void {
-  mainWindow?.webContents.send('main-to-webview', data);
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('main-to-webview', data);
 }
 
 async function loadAssets(): Promise<void> {
