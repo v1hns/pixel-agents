@@ -80,7 +80,11 @@ let monitor: AgentMonitor | null = null;
 
 function send(data: unknown): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.send('main-to-webview', data);
+  try {
+    mainWindow.webContents.send('main-to-webview', data);
+  } catch {
+    // window is closing — ignore
+  }
 }
 
 async function loadAssets(): Promise<void> {
@@ -207,6 +211,8 @@ function createWindow(): void {
   mainWindow.loadFile(WEBVIEW_DIST);
   mainWindow.webContents.openDevTools({ mode: 'detach' });
   mainWindow.on('closed', () => {
+    monitor?.stop();
+    monitor = null;
     mainWindow = null;
   });
 }
