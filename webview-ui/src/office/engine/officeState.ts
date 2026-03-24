@@ -38,6 +38,8 @@ export class OfficeState {
   layout: OfficeLayout;
   tileMap: TileTypeVal[][];
   seats: Map<string, Seat>;
+  /** Subset of seats from sofa/bench furniture — used for idle rest */
+  sofaSeats: Map<string, Seat>;
   blockedTiles: Set<string>;
   furniture: FurnitureInstance[];
   walkableTiles: Array<{ col: number; row: number }>;
@@ -58,9 +60,46 @@ export class OfficeState {
     this.layout = layout || createDefaultLayout();
     this.tileMap = layoutToTileMap(this.layout);
     this.seats = layoutToSeats(this.layout.furniture);
+    this.sofaSeats = this.computeSofaSeats();
     this.blockedTiles = getBlockedTiles(this.layout.furniture);
     this.furniture = layoutToFurnitureInstances(this.layout.furniture);
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles);
+  }
+
+  /** Returns true if this seat is from sofa/bench furniture (rest seat, not work seat) */
+  private isRestSeat(seat: Seat): boolean {
+    const t = seat.furnitureType.toUpperCase();
+    return t.includes('SOFA') || t.includes('BENCH');
+  }
+
+  private computeSofaSeats(): Map<string, Seat> {
+    const result = new Map<string, Seat>();
+    for (const [uid, seat] of this.seats) {
+      if (this.isRestSeat(seat)) result.set(uid, seat);
+    }
+    return result;
+  }
+
+  private findFreeRestSeat(nearCol: number, nearRow: number): string | null {
+    let bestId: string | null = null;
+    let bestDist = Infinity;
+    for (const [uid, seat] of this.sofaSeats) {
+      if (!seat.assigned) {
+        const d = Math.abs(seat.seatCol - nearCol) + Math.abs(seat.seatRow - nearRow);
+        if (d < bestDist) {
+          bestDist = d;
+          bestId = uid;
+        }
+      }
+    }
+    return bestId;
+  }
+
+  private releaseSofaSeat(ch: Character): void {
+    if (!ch.sofaSeatId) return;
+    const sofa = this.sofaSeats.get(ch.sofaSeatId);
+    if (sofa) sofa.assigned = false;
+    ch.sofaSeatId = null;
   }
 
   /** Rebuild all derived state from a new layout. Reassigns existing characters.
@@ -69,6 +108,7 @@ export class OfficeState {
     this.layout = layout;
     this.tileMap = layoutToTileMap(layout);
     this.seats = layoutToSeats(layout.furniture);
+    this.sofaSeats = this.computeSofaSeats();
     this.blockedTiles = getBlockedTiles(layout.furniture);
     this.rebuildFurnitureInstances();
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles);
@@ -175,6 +215,11 @@ export class OfficeState {
   }
 
   private findFreeSeat(): string | null {
+    // Prefer desk-adjacent chairs over sofas/benches for the work seat
+    for (const [uid, seat] of this.seats) {
+      if (!seat.assigned && !this.isRestSeat(seat)) return uid;
+    }
+    // Fall back to any free seat
     for (const [uid, seat] of this.seats) {
       if (!seat.assigned) return uid;
     }
@@ -274,11 +319,12 @@ export class OfficeState {
     const ch = this.characters.get(id);
     if (!ch) return;
     if (ch.matrixEffect === 'despawn') return; // already despawning
-    // Free seat and clear selection immediately
+    // Free seats and clear selection immediately
     if (ch.seatId) {
       const seat = this.seats.get(ch.seatId);
       if (seat) seat.assigned = false;
     }
+    this.releaseSofaSeat(ch);
     if (this.selectedAgentId === id) this.selectedAgentId = null;
     if (this.cameraFollowId === id) this.cameraFollowId = null;
     // Start despawn animation instead of immediate delete
@@ -463,6 +509,7 @@ export class OfficeState {
         const seat = this.seats.get(ch.seatId);
         if (seat) seat.assigned = false;
       }
+      this.releaseSofaSeat(ch);
       // Start despawn animation — keep character in map for rendering
       ch.matrixEffect = 'despawn';
       ch.matrixEffectTimer = 0;
@@ -494,6 +541,7 @@ export class OfficeState {
             const seat = this.seats.get(ch.seatId);
             if (seat) seat.assigned = false;
           }
+          this.releaseSofaSeat(ch);
           // Start despawn animation
           ch.matrixEffect = 'despawn';
           ch.matrixEffectTimer = 0;
@@ -520,12 +568,20 @@ export class OfficeState {
     const ch = this.characters.get(id);
     if (ch) {
       ch.isActive = active;
-      if (!active) {
+      if (active) {
+        // Release sofa seat so others can use it
+        this.releaseSofaSeat(ch);
+      } else {
         // Sentinel -1: signals turn just ended, skip next seat rest timer.
-        // Prevents the WALK handler from setting a 2-4 min rest on arrival.
         ch.seatTimer = -1;
         ch.path = [];
         ch.moveProgress = 0;
+        // Assign sofa seat immediately if available
+        const sofaId = this.findFreeRestSeat(ch.tileCol, ch.tileRow);
+        if (sofaId) {
+          this.sofaSeats.get(sofaId)!.assigned = true;
+          ch.sofaSeatId = sofaId;
+        }
       }
       this.rebuildFurnitureInstances();
     }
@@ -650,6 +706,16 @@ export class OfficeState {
     const newFrame = Math.floor(this.furnitureAnimTimer / FURNITURE_ANIM_INTERVAL_SEC);
     if (newFrame !== prevFrame) {
       this.rebuildFurnitureInstances();
+    }
+
+    // Lazily assign sofa seats to inactive characters that don't have one
+    for (const ch of this.characters.values()) {
+      if (ch.matrixEffect || ch.isActive || ch.sofaSeatId || ch.isSubagent) continue;
+      const sofaId = this.findFreeRestSeat(ch.tileCol, ch.tileRow);
+      if (sofaId) {
+        this.sofaSeats.get(sofaId)!.assigned = true;
+        ch.sofaSeatId = sofaId;
+      }
     }
 
     const toDelete: number[] = [];

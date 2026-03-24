@@ -10,7 +10,9 @@ contextBridge.exposeInMainWorld('acquireVsCodeApi', () => ({
 }));
 
 // Forward messages from main process → webview window event listener.
-// webview-ui/src/vscodeApi.ts listens for window 'message' events in vscode mode.
+// window.postMessage is used (not dispatchEvent) because it reliably crosses
+// Electron's contextIsolation boundary and the renderer's addEventListener
+// receives it correctly.
 ipcRenderer.on('main-to-webview', (_event, data: unknown) => {
-  window.dispatchEvent(new MessageEvent('message', { data }));
+  window.postMessage(data, '*');
 });

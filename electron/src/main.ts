@@ -203,6 +203,7 @@ function createWindow(): void {
   }
 
   mainWindow.loadFile(WEBVIEW_DIST);
+  mainWindow.webContents.openDevTools({ mode: 'detach' });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -217,9 +218,11 @@ ipcMain.on('webview-to-main', (_event, msg: Record<string, unknown>) => {
     case 'webviewReady':
       console.log('[electron] webviewReady — loading assets and sending state');
       loadAssets().then(() => {
+        // existingAgents MUST arrive before layoutLoaded — the webview buffers
+        // agents in pendingAgents[] and flushes them inside the layoutLoaded handler.
+        sendExistingAgents();
         sendLayout();
         send({ type: 'settingsLoaded', soundEnabled: true, externalAssetDirectories: [] });
-        sendExistingAgents();
       });
       break;
 
